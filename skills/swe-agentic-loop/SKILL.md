@@ -11,7 +11,7 @@ description: >-
 
 # SWE Agentic Loop (Two-Tier Multi-Agent Code & Review)
 
-This skill executes an autonomous multi-agent development loop combining an **Inner Iteration Loop** (fast Coder + Reviewer) and an **Outer Executive Review Loop** (high-capability Executive Reviewer), orchestrated by the main chat agent.
+This skill executes an autonomous multi-agent development loop combining an **Inner Iteration Loop** (fast Coder + Reviewer, `gemini-3.6-flash` on Copilot CLI / `claude-opus-5` at low effort on Claude Code) and an **Outer Executive Review Loop** (`claude-opus-5` Executive Reviewer at high effort), orchestrated by the main chat agent.
 
 It is **stack-agnostic**: the Orchestrator detects the project's own build/test/lint commands at runtime instead of assuming any particular toolchain.
 
@@ -34,13 +34,13 @@ It is **stack-agnostic**: the Orchestrator detects the project's own build/test/
                                   └─────────────┬─────────────┘
                                                 │
  ┌──────────────────────────────────────────────┴──────────────────────────────────────────────┐
- │ INNER ITERATION LOOP (fast model)                                                           │
+ │ INNER ITERATION LOOP (gemini-3.6-flash | claude-opus-5 @ low)                                │
  │                                                                                             │
  │  ┌───────────────────────┐   write_agent (Submit Diff)    ┌──────────────────────────────┐  │
  │  │ Coder Agent           ├───────────────────────────────►│ Reviewer Agent               │  │
  │  │ (`coder-agent`)       │                                │ (`reviewer-agent`)           │  │
- │  │ Model: fast tier      │◄───────────────────────────────┤ Model: fast tier             │  │
- │  │ Reasoning: medium     │                                │ Reasoning: medium            │  │
+ │  │ Model: flash|opus     │◄───────────────────────────────┤ Model: flash|opus            │  │
+ │  │ Effort: medium|low    │                                │ Effort: medium|low           │  │
  │  │ - Implements edits    │   write_agent (Defect Feedback)│ - Audits git diff & tests    │  │
  │  └───────────────────────┘                                └──────────────┬───────────────┘  │
  │                                                                          │                  │
@@ -57,12 +57,12 @@ It is **stack-agnostic**: the Orchestrator detects the project's own build/test/
                                                  write_agent (Submit Diff)  │                  │
                                                                             ▼                  │
  ┌─────────────────────────────────────────────────────────────────────────────────────────────┘
- │ OUTER EXECUTIVE REVIEW LOOP (high-capability model)
+ │ OUTER EXECUTIVE REVIEW LOOP (claude-opus-5 @ high)
  │
  │  ┌─────────────────────────────────────────┐
  │  │ Executive Reviewer Agent                │
  │  │ (`executive-reviewer-agent`)            │
- │  │ Model: high-capability tier             │
+ │  │ Model: claude-opus-5                    │
  │  │ Reasoning Effort: high                  │
  │  │ - Deep Architectural & Security Audit   │
  │  └────────────────────┬────────────────────┘
@@ -85,24 +85,61 @@ It is **stack-agnostic**: the Orchestrator detects the project's own build/test/
 
 ---
 
-## Model Tier Selection
+## Model Selection (Runtime-Specific)
 
-The skill is model-agnostic. The Orchestrator picks the best available models from the runtime's `task` tool enum:
+**Step A — Detect the host runtime.** Inspect the available sub-agent tooling and model enum:
 
-| Role | Tier | Guidance |
+| Signal | Runtime |
+| :--- | :--- |
+| `task` tool exposes a `model` enum containing `gemini-*` entries, `write_agent`/`read_agent`/`list_agents` present | **GitHub Copilot CLI** |
+| `Task` tool with `subagent_type`, no `gemini-*` models available, Anthropic-only model list | **Claude Code** |
+| Neither pattern matches | **Unknown** — use the Generic Fallback row |
+
+**Step B — Apply the matching model matrix. These assignments are mandatory when the model is available.**
+
+### GitHub Copilot CLI
+
+| Role | Model | Reasoning Effort |
 | :--- | :--- | :--- |
-| `coder-agent` | **Fast** | A cheap, quick model (e.g. a "flash"/"mini" class model). Reasoning effort: `medium`. |
-| `reviewer-agent` | **Fast** | Same tier as the Coder so the inner loop stays cheap. Reasoning effort: `medium`. |
-| `executive-reviewer-agent` | **High-capability** | The strongest reasoning model available. Reasoning effort: `high`. |
+| `coder-agent` (inner) | `gemini-3.6-flash` | `medium` |
+| `reviewer-agent` (inner) | `gemini-3.6-flash` | `medium` |
+| `executive-reviewer-agent` (outer) | `claude-opus-5` | `high` |
 
-If a named model is unavailable in the current runtime, omit the `model` field and let the agent type default apply.
+### Claude Code
+
+Gemini models are not available, so the inner loop runs on Opus at a deliberately **low** thinking
+budget to keep iterations cheap and fast; the outer executive review keeps the full budget.
+
+| Role | Model | Thinking Effort |
+| :--- | :--- | :--- |
+| `coder-agent` (inner) | `claude-opus-5` | `low` |
+| `reviewer-agent` (inner) | `claude-opus-5` | `low` |
+| `executive-reviewer-agent` (outer) | `claude-opus-5` | `high` |
+
+If the runtime does not accept a `reasoning_effort` / thinking parameter on sub-agents, express the
+budget in the prompt instead — prefix inner-loop prompts with "Work quickly and do not overthink;
+keep reasoning brief." and the executive prompt with "Think deeply and thoroughly before answering."
+
+### Generic Fallback
+
+Used **only** when the specific models above are unavailable in the runtime's model enum. Never
+invent a model identifier — if a name is rejected, downgrade one step and continue.
+
+| Role | Fallback Order |
+| :--- | :--- |
+| `coder-agent` / `reviewer-agent` | Any fast/cheap tier: `gemini-3.5-flash` → `gpt-5.4-mini` → `claude-haiku-4.5` → `gpt-5-mini` → omit `model` |
+| `executive-reviewer-agent` | Any strongest reasoning tier: `claude-opus-4.8` → `gpt-5.6-sol` → `claude-sonnet-5` → omit `model` |
+
+If every candidate is rejected, omit the `model` field entirely and let the agent type's default
+apply — the loop protocol still functions, only the cost/quality profile changes. State the
+substitution in the final report so the user knows which models actually ran.
 
 ---
 
 ## Orchestrator Execution State Machine
 
 ```
-   [STATE 0: INIT]                 ────── Detect repo, VCS state, and project test/lint commands
+   [STATE 0: INIT]                 ────── Detect host runtime + models, repo/VCS state, test commands
           │
           ▼
    [STATE 1: CHECK_TEST_PREFERENCE] ────── (Reuse history OR ask_user; fallback to plain text)
@@ -119,7 +156,7 @@ If a named model is unavailable in the current runtime, omit the `model` field a
  │        └────── (VERDICT: APPROVED / native approval phrase)
  │                  │
  │                  ▼
- │         [STATE 4: OUTER_LOOP_EXECUTION] ── (Orchestrator passes diff to Executive Reviewer)
+ │         [STATE 4: OUTER_LOOP_EXECUTION] ── (Orchestrator passes diff to claude-opus-5 reviewer)
  │                  │
  │                  ├────── (VERDICT: REJECTED & Outer Count < 10) ──► Route feedback back to Coder
  │                  │                                                 (Reset Inner Count = 0)
@@ -134,9 +171,9 @@ If a named model is unavailable in the current runtime, omit the `model` field a
 
 ## Step-by-Step Execution Protocol
 
-### Step 0: Project Discovery (Stack Detection)
+### Step 0: Runtime & Project Discovery
 
-Before spawning agents, the Orchestrator MUST establish the project's own conventions so sub-agent prompts contain concrete, correct commands:
+Before spawning agents, the Orchestrator MUST resolve two things: **which models to use** (see the Model Selection section above — determine the host runtime and lock in the model/effort matrix) and **the project's own conventions**, so sub-agent prompts contain concrete, correct commands:
 
 1. Confirm a VCS root exists (`git rev-parse --show-toplevel`). If the directory is not a git repository, warn the user that diff-based review is degraded and offer to `git init` or proceed with file-listing review only.
 2. Detect the toolchain and its test/lint/build commands from the manifests actually present, for example:
@@ -147,6 +184,7 @@ Before spawning agents, the Orchestrator MUST establish the project's own conven
    - `Makefile`, `Justfile`, `build.gradle`, `pom.xml`, `*.csproj`
 3. Record the resolved commands as `<INSERT_PROJECT_COMMANDS>` and inject them into every sub-agent prompt.
 4. Never invent a command. If no test command can be discovered, set the testing strategy to static review only and say so in the final report.
+5. Record the resolved model/effort pair per role as `<INNER_MODEL>` / `<INNER_EFFORT>` and `<OUTER_MODEL>` / `<OUTER_EFFORT>`, and report them in the final summary.
 
 ---
 
@@ -196,8 +234,8 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
 
 #### Phase 1A: Reviewer Agent (`reviewer-agent`)
 - **Agent Type**: `code-review`
-- **Model**: fast tier
-- **Reasoning Effort**: `medium`
+- **Model**: `gemini-3.6-flash` (Copilot CLI) / `claude-opus-5` (Claude Code) — see Model Selection
+- **Reasoning Effort**: `medium` (Copilot CLI) / `low` (Claude Code)
 - **Role**: Monitors `git diff`, audits code for bugs and security risks, checks for code duplication (DRY principle), runs targeted tests, and issues formatted verdicts.
 
 ```json
@@ -205,6 +243,7 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
   "name": "reviewer-agent",
   "agent_type": "code-review",
   "mode": "background",
+  "model": "gemini-3.6-flash",
   "reasoning_effort": "medium",
   "description": "Audit git diff, check DRY code duplication, and run tests",
   "prompt": "You are the Reviewer Agent (reviewer-agent). Your role is to perform rigorous code reviews on changes made by Coder Agent.\n\nTASK SPECIFICATION:\n<INSERT_TASK_SPECIFICATION>\n\nTESTING STRATEGY:\n<INSERT_TESTING_STRATEGY>\n\nPROJECT COMMANDS (detected from this repository - do not invent others):\n<INSERT_PROJECT_COMMANDS>\n\n1. When notified by Coder Agent or Orchestrator, capture the complete diff surface using bash:\n   git add -N . && git --no-pager diff HEAD\n   and verify untracked files with: git status --porcelain\n2. Audit changes against the task requirements, security rules, error handling, the repository's existing lint/style conventions, and DRY principles (ensure code duplication is avoided by reusing existing helpers/shared modules or extracting reusable functions).\n3. If the testing strategy is 'run_tests', execute the narrowest relevant test command from PROJECT COMMANDS. Never introduce a new test framework.\n4. Judge only the changed surface. Do not demand fixes for pre-existing issues unrelated to the task.\n5. Output your verdict prominently using one of the following exact token formats:\n   - If defects found:\n     write_agent(agent_id: '<CODER_AGENT_ID>', message: 'VERDICT: REJECTED\\nDefects found:\\n1. [FILE:LINE] Issue description (e.g., duplicated code/missing helper reuse)...\\nPlease fix and resubmit.')\n   - If code is clean, deduplicated, and tests pass:\n     write_agent(agent_id: '<CODER_AGENT_ID>', message: 'VERDICT: APPROVED. All checks pass with zero defects.')\n6. PEER DISCOVERY & VERDICT ROUTING: Use <CODER_AGENT_ID> provided in the prompt or initial message to route verdicts. If <CODER_AGENT_ID> is missing or unset, call list_agents(scope: 'siblings') to resolve Coder Agent's ID by name."
@@ -213,7 +252,7 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
 
 #### Phase 1B: Executive Reviewer Agent (`executive-reviewer-agent`)
 - **Agent Type**: `code-review`
-- **Model**: high-capability tier
+- **Model**: `claude-opus-5` (both runtimes)
 - **Reasoning Effort**: `high`
 - **Role**: Stands by for Tier B outer-loop requests from the main Orchestrator. Performs high-level architectural, structural, security, and DRY code-duplication reviews strictly on the diff summary and code changes provided to it by the Orchestrator.
 - **Strict Role Boundary**: the Executive Reviewer does **NOT** run file inspection tools, grep/glob searches, or filesystem navigation. It evaluates the diff and implementation artifacts supplied directly in the Orchestrator's review request.
@@ -223,6 +262,7 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
   "name": "executive-reviewer-agent",
   "agent_type": "code-review",
   "mode": "background",
+  "model": "claude-opus-5",
   "reasoning_effort": "high",
   "description": "Executive architecture, security, and DRY deduplication review of provided diffs",
   "prompt": "You are the Executive Reviewer Agent (executive-reviewer-agent). Your sole role is to perform high-level architectural, structural, security, and code-duplication reviews on code changes approved by the Inner Loop.\n\nTASK SPECIFICATION:\n<INSERT_TASK_SPECIFICATION>\n\nSTRICT ROLE BOUNDARIES & PROTOCOL:\n1. Stand by for review requests sent by the main Orchestrator agent.\n2. Do NOT run file search commands (grep, glob, view, ls). You evaluate strictly the git diff and implementation summary provided to you in the Orchestrator review request.\n3. Evaluate the submitted changes for architectural patterns, modularity, DRY principles (strict avoidance of code duplication and maximum reuse of shared contracts/utils), type safety, security controls, and regression risks.\n4. Raise only high-confidence, material findings. Do not raise stylistic nits or request changes outside the task scope.\n5. Output your final verdict prominently in one of two exact token formats:\n   - If approved: 'VERDICT: APPROVED. Architectural and security audit passed with zero defects.'\n   - If changes required: 'VERDICT: REJECTED\\nExecutive Reviewer Findings:\\n1. [Architectural/Security/Deduplication Issue] Description and recommended fix...'"
@@ -231,8 +271,8 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
 
 #### Phase 2: Coder Agent (`coder-agent`)
 - **Agent Type**: `general-purpose`
-- **Model**: fast tier
-- **Reasoning Effort**: `medium`
+- **Model**: `gemini-3.6-flash` (Copilot CLI) / `claude-opus-5` (Claude Code) — see Model Selection
+- **Reasoning Effort**: `medium` (Copilot CLI) / `low` (Claude Code)
 - **Role**: Reads task specifications, inspects the codebase, applies edits using `edit`/`create`/bash tools while actively avoiding code duplication, notifies the Reviewer agent, and pauses upon approval.
 
 ```json
@@ -240,11 +280,17 @@ To ensure sub-agents can communicate seamlessly, the Orchestrator MUST follow a 
   "name": "coder-agent",
   "agent_type": "general-purpose",
   "mode": "background",
+  "model": "gemini-3.6-flash",
   "reasoning_effort": "medium",
   "description": "Implement code changes for task",
   "prompt": "You are the Coder Agent (coder-agent). Your role is to implement the requested code changes in this repository.\n\nTASK SPECIFICATION:\n<INSERT_TASK_SPECIFICATION>\n\nPROJECT COMMANDS (detected from this repository - do not invent others):\n<INSERT_PROJECT_COMMANDS>\n\nTARGET REVIEWER AGENT ID:\n<REVIEWER_AGENT_ID>\n\n1. Read the user requirements carefully.\n2. Inspect relevant files using view, grep, or glob, and follow the conventions already present in this codebase.\n3. CODE DEDUPLICATION & DRY PRINCIPLE: Before writing new logic, search the repository for existing utilities, shared modules, and helpers to avoid repeating code. Reuse existing helpers or extract common reusable functions whenever implementing similar logic across multiple modules.\n4. Make precise, surgical edits using the edit or create tools. Do not refactor unrelated code.\n5. Once edits are applied, submit your diff to Reviewer Agent using write_agent:\n   write_agent(agent_id: '<REVIEWER_AGENT_ID>', message: 'I have applied code changes for the task. Please review the git diff and verify.')\n6. Wait for feedback from Reviewer Agent or Orchestrator. When feedback arrives, apply the requested fixes and submit again.\n7. TERMINAL BEHAVIOR: Upon receiving VERDICT: APPROVED from the Reviewer, make no further edits and end your turn. Remain available: if the Orchestrator subsequently sends Executive Reviewer findings, resume work and address them."
 }
 ```
+
+> **Runtime note**: the three JSON templates above show the **GitHub Copilot CLI** model values.
+> When running in **Claude Code**, substitute the inner-loop agents' `model` with `claude-opus-5`
+> and their effort with `low`; the executive reviewer is unchanged. If a model or effort field is
+> rejected by the runtime, drop that field (see Generic Fallback) rather than aborting the loop.
 
 ---
 
@@ -341,8 +387,8 @@ Once `reviewer-agent` outputs `VERDICT: APPROVED` (or a native approval phrase) 
 
 #### 1. Convergence Criteria
 The multi-agent loop achieves **Full Convergence** ONLY when both criteria are met:
-1. `reviewer-agent` issues `VERDICT: APPROVED` (or a native approval phrase) in Tier A.
-2. `executive-reviewer-agent` issues `VERDICT: APPROVED` (or a native approval phrase) in Tier B.
+1. `reviewer-agent` (inner model) issues `VERDICT: APPROVED` (or a native approval phrase) in Tier A.
+2. `executive-reviewer-agent` (`claude-opus-5`) issues `VERDICT: APPROVED` (or a native approval phrase) in Tier B.
 
 #### 2. Max Iteration Caps
 To prevent infinite communication loops and resource exhaustion:
@@ -366,6 +412,7 @@ To prevent infinite communication loops and resource exhaustion:
 | **Not a git repository** | Warn the user that diff-based review is unavailable. Offer to run `git init` or fall back to reviewing explicitly listed changed files. |
 | **Unclean Working Directory** | Before starting the loop, verify `git status --porcelain`. If uncommitted manual changes exist, ask the user before stashing. If approved, run `git stash push -u -m "agentic-loop-<timestamp>"` to preserve untracked and modified files, and report the stash ref so it can be restored. |
 | **No test command discovered** | Downgrade the testing strategy to static review only and state this explicitly in the final report. Never install a new test framework to satisfy the loop. |
+| **Model rejected by runtime** | If `task` rejects a `model` or `reasoning_effort` value, retry once with the next candidate in the Generic Fallback order, then retry with the field omitted. Never abort the loop over model selection, and always disclose the substitution in the final report. |
 | **Conflicting Feedback (Inner vs Outer)** | Executive Reviewer feedback takes precedence over Inner Reviewer preferences. |
 | **Test Failures vs Static Review** | Test failures are treated as blocking defects (`VERDICT: REJECTED`). |
 | **Non-Blocking Warnings / Nits** | Reviewer may issue `VERDICT: APPROVED with non-blocking suggestions`. The inner loop can proceed to Tier B. |
@@ -383,6 +430,7 @@ When the loop terminates (via Full Convergence or Cap Exceeded), present a clean
 ### 🤖 Multi-Agent Loop Execution Summary
 
 - **Overall Status**: ✅ Fully Approved (Inner Loop + Executive Review)
+- **Models Used**: Inner `gemini-3.6-flash` (medium) · Executive `claude-opus-5` (high)
 - **Inner Loop Iterations**: 2 cycles (Coder ↔ Reviewer)
 - **Outer Executive Review**: 1 cycle
 - **Testing Strategy**: Executed targeted unit tests - 100% passing
@@ -393,5 +441,5 @@ When the loop terminates (via Full Convergence or Cap Exceeded), present a clean
 
 #### Audit Trail:
 - **Inner Reviewer**: Approved after iteration 2 fix.
-- **Executive Reviewer**: Approved architectural design & security posture.
+- **Executive Reviewer (claude-opus-5)**: Approved architectural design & security posture.
 ```

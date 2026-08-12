@@ -1,7 +1,7 @@
 # swe-agentic-loop
 
 An installable **agent skill** that runs a two-tier, multi-agent software engineering loop:
-a fast **Coder** and **Reviewer** iterate in an inner loop, then a high-capability
+a fast **Coder** and **Reviewer** iterate in an inner loop, then a `claude-opus-5`
 **Executive Reviewer** performs an architectural and security audit in an outer loop.
 The loop runs until both tiers approve, or until iteration caps are hit.
 
@@ -50,6 +50,21 @@ cp -R skills/swe-agentic-loop ~/.copilot/skills/
 
 Restart your agent session so the skill is picked up.
 
+## Models
+
+The skill pins specific models per host runtime, so the inner loop stays cheap while the
+executive audit gets full reasoning power.
+
+| Runtime | Coder + Reviewer (inner) | Executive Reviewer (outer) |
+| :--- | :--- | :--- |
+| **GitHub Copilot CLI** | `gemini-3.6-flash` — effort `medium` | `claude-opus-5` — effort `high` |
+| **Claude Code** | `claude-opus-5` — thinking `low` | `claude-opus-5` — thinking `high` |
+
+If a model is unavailable in the runtime, the orchestrator falls back down a generic tier list
+(`gemini-3.5-flash` → `gpt-5.4-mini` → `claude-haiku-4.5` for the inner loop; `claude-opus-4.8`
+→ `gpt-5.6-sol` → `claude-sonnet-5` for the executive) and, as a last resort, omits the field
+entirely. Whatever actually ran is disclosed in the final report.
+
 ## Usage
 
 Once installed, trigger it by intent or by name:
@@ -60,7 +75,7 @@ Once installed, trigger it by intent or by name:
 
 The orchestrator will:
 
-1. Detect your repository's toolchain and test commands.
+1. Detect the host runtime (model matrix) and your repository's toolchain and test commands.
 2. Ask once whether tests should run in the loop, or be skipped for speed.
 3. Spawn `reviewer-agent` and `executive-reviewer-agent`, then `coder-agent`, and bind their IDs.
 4. Iterate: Coder implements → Reviewer audits the `git diff` and runs targeted tests.
