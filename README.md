@@ -57,11 +57,11 @@ executive audit gets full reasoning power.
 
 | Runtime | Coder + Reviewer (inner) | Executive Reviewer (outer) |
 | :--- | :--- | :--- |
-| **GitHub Copilot CLI** | `gemini-3.6-flash` — effort `medium` | `claude-opus-5` — effort `high` |
+| **GitHub Copilot CLI** | `gemini-3.7-flash` — effort `medium` | `claude-opus-5` — effort `high` |
 | **Claude Code** | `claude-opus-5` — thinking `low` | `claude-opus-5` — thinking `high` |
 
 If a model is unavailable in the runtime, the orchestrator falls back down a generic tier list
-(`gemini-3.5-flash` → `gpt-5.4-mini` → `claude-haiku-4.5` for the inner loop; `claude-opus-4.8`
+(`gemini-3.6-flash` → `gpt-5.4-mini` → `claude-haiku-4.5` for the inner loop; `claude-opus-4.8`
 → `gpt-5.6-sol` → `claude-sonnet-5` for the executive) and, as a last resort, omits the field
 entirely. Whatever actually ran is disclosed in the final report.
 
@@ -82,6 +82,11 @@ The orchestrator will:
 5. On inner approval, hand the diff to the Executive Reviewer for an architecture/security audit.
 6. Route any executive findings back to the Coder and re-enter the inner loop.
 7. Print a final summary with the audit trail once both tiers approve.
+
+Throughout, the orchestrator **only orchestrates**: it spawns the agents, routes their messages,
+and reports each exchange to the chat as it happens — quoting verdicts and defect lists verbatim
+and attributing them to the agent that raised them. It never reviews, edits, or verifies the code
+itself; all implementation belongs to the Coder and all judgement to the two Reviewers.
 
 ## Requirements
 
