@@ -80,5 +80,8 @@ mv "${TMP_DIR}" "${DEST_DIR}"
 trap - EXIT
 chmod -R u+rw "${DEST_DIR}"
 
+if [ -d "${DEST_DIR}/scripts" ]; then
+  echo "Installed support scripts: $(cd -- "${DEST_DIR}/scripts" && printf '%s ' *)"
+fi
 echo "Installed ${SKILL_NAME} -> ${DEST_DIR}"
 echo "Restart your agent session, then try: /${SKILL_NAME}"
